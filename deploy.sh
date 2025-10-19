@@ -180,6 +180,12 @@ gcloud run deploy orchestrator-service \
   --service-account "${SERVICE_ACCOUNT}" \
   --project "${PROJECT_ID}"
 
+ORCHESTRATOR_URL="$(gcloud run services describe orchestrator-service \
+  --region "${REGION}" \
+  --format 'value(status.url)' \
+  --project "${PROJECT_ID}")"
+log "Orchestrator URL: ${ORCHESTRATOR_URL}"
+
 # --- Prepare Cloud Functions Packages ---------------------------------------
 
 # --- Deploy Cloud Functions (Gen2) ------------------------------------------
@@ -195,7 +201,7 @@ deploy_function() {
     --source . \
     --entry-point handle_message \
     --trigger-topic "${topic}" \
-    --set-env-vars PROJECT_ID="${PROJECT_ID}" \
+    --set-env-vars PROJECT_ID="${PROJECT_ID}",ORCHESTRATOR_URL="${ORCHESTRATOR_URL}" \
     --set-secrets GEMINI_API_KEY=gemini-api-key:latest \
     --service-account "${SERVICE_ACCOUNT}" \
     --memory 1GB \
@@ -212,13 +218,7 @@ deploy_function "validator" "agent-validator-tasks"
 
 # --- Output -----------------------------------------------------------------
 
-ORCHESTRATOR_URL="$(gcloud run services describe orchestrator-service \
-  --region "${REGION}" \
-  --format 'value(status.url)' \
-  --project "${PROJECT_ID}")"
-
 log "Deployment complete"
-log "Orchestrator URL: ${ORCHESTRATOR_URL}"
 log "Example request:"
 cat <<EOF
 curl -X POST ${ORCHESTRATOR_URL}/tasks \\

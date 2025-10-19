@@ -15,6 +15,7 @@ import pandas as pd
 import numpy as np
 from collections import Counter
 import statistics
+import requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +29,31 @@ firestore_client = firestore.Client(project=project_id)
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
 MODEL_NAME = os.environ.get('GEMINI_MODEL', 'gemini-2.5-pro')
 model = genai.GenerativeModel(MODEL_NAME)
+ORCHESTRATOR_URL = os.environ.get('ORCHESTRATOR_URL', '').rstrip('/')
+LOCAL_MODE = str(os.environ.get("LOCAL_MODE", "0")).lower() in {"1", "true", "yes"}
+
+
+def notify_orchestrator(task_id: str, subtask_id: str, agent_type: str, result: Optional[Dict[str, Any]], error: Optional[str]) -> None:
+    """Post agent outcome back to the orchestrator webhook."""
+    if not ORCHESTRATOR_URL:
+        logger.warning("ORCHESTRATOR_URL not set; skipping orchestrator notification for %s", subtask_id)
+        return
+    if LOCAL_MODE:
+        logger.debug("[LOCAL] Skipping orchestrator webhook notification for %s", subtask_id)
+        return
+    payload = {
+        "task_id": task_id,
+        "subtask_id": subtask_id,
+        "agent_type": agent_type,
+        "result": result,
+        "error": error,
+    }
+    try:
+        response = requests.post(f"{ORCHESTRATOR_URL}/webhook/agent-result", json=payload, timeout=10)
+        response.raise_for_status()
+        logger.info("Reported %s completion to orchestrator", subtask_id)
+    except Exception as exc:
+        logger.error("Failed to notify orchestrator for %s: %s", subtask_id, exc)
 
 class AnalysisAgent:
     """Agent specialized in data analysis and insights generation"""
@@ -343,6 +369,13 @@ def handle_message(cloud_event):
         })
         
         logger.info(f"Analysis task {subtask_id} completed successfully")
+        notify_orchestrator(
+            task_id=task_id,
+            subtask_id=subtask_id,
+            agent_type="analysis",
+            result=result,
+            error=None,
+        )
         
     except Exception as e:
         logger.error(f"Analysis task {subtask_id} failed: {e}")
@@ -354,3 +387,10 @@ def handle_message(cloud_event):
             'error': str(e),
             'completed_at': datetime.utcnow().isoformat()
         })
+        notify_orchestrator(
+            task_id=task_id,
+            subtask_id=subtask_id,
+            agent_type="analysis",
+            result=None,
+            error=str(e),
+        )

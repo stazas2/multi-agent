@@ -148,6 +148,7 @@ gcloud config set project $PROJECT_ID
 | `PROJECT_ID` | Target Google Cloud project | `gcloud projects list` or Cloud Console |
 | `REGION` | Region for Cloud Run/Functions (e.g. `us-central1`) | Choose any supported region |
 | `GEMINI_API_KEY` | Access token for Gemini API | [Google AI Studio](https://ai.google.dev/) → *Get API key* |
+| `ORCHESTRATOR_URL` | Base URL of the deployed orchestrator (`https://...`) used by agents to post results | Automatically set by `deploy.sh`; set manually if invoking agents outside the script |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to service-account JSON with Firestore/PubSub/Tasks access | Create in Cloud Console → IAM & Admin → Service Accounts |
 
 These variables are loaded automatically if you place them in a `.env` file (thanks to `python-dotenv`) or export them in your shell before running deployments/tests.
