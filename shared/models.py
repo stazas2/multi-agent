@@ -42,6 +42,12 @@ class TaskContext:
     
     # Metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Distributed tracing support
+    trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    # Optimistic locking
+    lock_version: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Firestore"""
@@ -57,6 +63,8 @@ class TaskContext:
         data['status'] = TaskStatus(data.get('status', 'pending'))
         data['created_at'] = datetime.fromisoformat(data.get('created_at', datetime.utcnow().isoformat()))
         data['updated_at'] = datetime.fromisoformat(data.get('updated_at', datetime.utcnow().isoformat()))
+        data['trace_id'] = data.get('trace_id') or str(uuid.uuid4())
+        data['lock_version'] = data.get('lock_version', 0)
         return cls(**data)
 
 @dataclass
@@ -107,6 +115,7 @@ class SubTask:
     error: Optional[str] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    lock_version: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -126,4 +135,5 @@ class SubTask:
             data['started_at'] = datetime.fromisoformat(data['started_at'])
         if data.get('completed_at'):
             data['completed_at'] = datetime.fromisoformat(data['completed_at'])
+        data['lock_version'] = data.get('lock_version', 0)
         return cls(**data)

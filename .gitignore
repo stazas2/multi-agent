@@ -1,16 +1,26 @@
 .venv
 .env
 .env.*
+*.envrc
+
+# Agent build artefacts
 agents/*/function.zip
+agents/*/dist/
+agents/*/build/
+agents/*/*.zip
 
 # Terraform
 .terraform/
 .terraform.lock.hcl
 terraform.tfstate
-terraform.tfstate.backup
-*.tfvars
+terraform.tfstate.*
+terraform.tfvars
+terraform.tfstate.d/
 
-# Python cache
+# Local tooling / caches
 __pycache__/
 *.pyc
 *.pyo
+*.log
+.DS_Store
+Thumbs.db

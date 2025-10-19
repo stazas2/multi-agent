@@ -200,6 +200,16 @@ gcloud functions deploy research-agent \
 # Repeat for other agents...
 ```
 
+### Recommended Quality Checks
+
+Перед запуском `deploy.sh` или выкладкой изменений прогоните локальные проверки качества:
+
+```powershell
+pwsh scripts/run_checks.ps1   # Ruff → Black → MyPy → Pytest (только если команды установлены)
+```
+
+Скрипт пропускает отсутствующие утилиты, поэтому его легко добавить и в CI/CD.
+
 ## 📝 Usage Examples
 
 ### Basic Task Submission

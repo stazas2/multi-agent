@@ -38,10 +38,27 @@ if not LOCAL_MODE:
             self.db = firestore.Client(project=project_id)
 
         def save_task_context(self, context: TaskContext) -> None:
-            context.updated_at = datetime.utcnow()
+            """Persist TaskContext with optimistic locking."""
+
             doc_ref = self.db.collection("tasks").document(context.task_id)
+            snapshot = doc_ref.get()
+
+            if snapshot.exists:
+                data = snapshot.to_dict() or {}
+                current_version = data.get("lock_version", 0)
+                if current_version != context.lock_version:
+                    raise ValueError(
+                        f"Task {context.task_id} was updated concurrently (expected version {context.lock_version}, "
+                        f"actual {current_version})."
+                    )
+                next_version = current_version + 1
+            else:
+                next_version = 0
+
+            context.updated_at = datetime.utcnow()
+            context.lock_version = next_version
             doc_ref.set(context.to_dict())
-            logger.info("Saved task context: %s", context.task_id)
+            logger.info("Saved task context %s (version %s)", context.task_id, next_version)
 
         def get_task_context(self, task_id: str) -> Optional[TaskContext]:
             doc = self.db.collection("tasks").document(task_id).get()
@@ -50,17 +67,42 @@ if not LOCAL_MODE:
             return None
 
         def update_task_status(self, task_id: str, status: TaskStatus) -> None:
+            """Update task status while incrementing lock version."""
+
             doc_ref = self.db.collection("tasks").document(task_id)
+            snapshot = doc_ref.get()
+            if not snapshot.exists:
+                raise ValueError(f"Task {task_id} not found")
+            data = snapshot.to_dict() or {}
+            current_version = data.get("lock_version", 0)
             doc_ref.update({
                 "status": status.value,
-                "updated_at": datetime.utcnow().isoformat()
+                "updated_at": datetime.utcnow().isoformat(),
+                "lock_version": current_version + 1,
             })
             logger.info("Updated task %s status to %s", task_id, status.value)
 
         def save_subtask(self, subtask: SubTask) -> None:
+            """Persist SubTask with optimistic locking."""
+
             doc_ref = self.db.collection("subtasks").document(subtask.subtask_id)
+            snapshot = doc_ref.get()
+
+            if snapshot.exists:
+                data = snapshot.to_dict() or {}
+                current_version = data.get("lock_version", 0)
+                if current_version != subtask.lock_version:
+                    raise ValueError(
+                        f"Subtask {subtask.subtask_id} was updated concurrently (expected version {subtask.lock_version}, "
+                        f"actual {current_version})."
+                    )
+                next_version = current_version + 1
+            else:
+                next_version = 0
+
+            subtask.lock_version = next_version
             doc_ref.set(subtask.to_dict())
-            logger.info("Saved subtask: %s", subtask.subtask_id)
+            logger.info("Saved subtask %s (version %s)", subtask.subtask_id, next_version)
 
         def get_subtasks_for_task(self, task_id: str) -> List[SubTask]:
             query = self.db.collection("subtasks").where("parent_task_id", "==", task_id)
@@ -74,10 +116,18 @@ if not LOCAL_MODE:
             return None
 
         def update_agent_result(self, task_id: str, agent_type: str, result: Dict[str, Any]) -> None:
+            """Update agent result with version bump."""
+
             doc_ref = self.db.collection("tasks").document(task_id)
+            snapshot = doc_ref.get()
+            if not snapshot.exists:
+                raise ValueError(f"Task {task_id} not found for agent result")
+            data = snapshot.to_dict() or {}
+            current_version = data.get("lock_version", 0)
             doc_ref.update({
                 f"agent_results.{agent_type}": result,
-                "updated_at": datetime.utcnow().isoformat()
+                "updated_at": datetime.utcnow().isoformat(),
+                "lock_version": current_version + 1,
             })
             logger.info("Updated %s results for task %s", agent_type, task_id)
 
@@ -93,6 +143,16 @@ else:
 
         def save_task_context(self, context: TaskContext) -> None:
             context.updated_at = datetime.utcnow()
+            existing = self.tasks.get(context.task_id)
+            if existing:
+                if existing.lock_version != context.lock_version:
+                    raise ValueError(
+                        f"[LOCAL] Task {context.task_id} version mismatch "
+                        f"(expected {context.lock_version}, actual {existing.lock_version})"
+                    )
+                context.lock_version += 1
+            else:
+                context.lock_version = 0
             # Store a clone to avoid shared references
             self.tasks[context.task_id] = TaskContext.from_dict(context.to_dict())
             logger.debug("[LOCAL] Saved task context: %s", context.task_id)
@@ -105,11 +165,20 @@ else:
             ctx = self.tasks.get(task_id)
             if ctx:
                 ctx.status = status
-                ctx.updated_at = datetime.utcnow()
-                self.tasks[task_id] = ctx
+                self.save_task_context(ctx)
                 logger.debug("[LOCAL] Updated task %s status to %s", task_id, status.value)
 
         def save_subtask(self, subtask: SubTask) -> None:
+            existing = self.subtasks.get(subtask.subtask_id)
+            if existing:
+                if existing.lock_version != subtask.lock_version:
+                    raise ValueError(
+                        f"[LOCAL] Subtask {subtask.subtask_id} version mismatch "
+                        f"(expected {subtask.lock_version}, actual {existing.lock_version})"
+                    )
+                subtask.lock_version += 1
+            else:
+                subtask.lock_version = 0
             self.subtasks[subtask.subtask_id] = SubTask.from_dict(subtask.to_dict())
             logger.debug("[LOCAL] Saved subtask: %s", subtask.subtask_id)
 
@@ -124,8 +193,7 @@ else:
             ctx = self.tasks.get(task_id)
             if ctx:
                 ctx.agent_results[agent_type] = result
-                ctx.updated_at = datetime.utcnow()
-                self.tasks[task_id] = ctx
+                self.save_task_context(ctx)
                 logger.debug("[LOCAL] Updated %s results for task %s", agent_type, task_id)
 
 
@@ -138,7 +206,8 @@ if not LOCAL_MODE:
 
         def __init__(self, project_id: str, **_: Any):
             self.project_id = project_id
-            self.publisher = pubsub_v1.PublisherClient()
+            publisher_options = pubsub_v1.types.PublisherOptions(enable_message_ordering=True)
+            self.publisher = pubsub_v1.PublisherClient(publisher_options=publisher_options)
             self.subscriber = pubsub_v1.SubscriberClient()
             self._result_handler = None
 
@@ -166,7 +235,12 @@ if not LOCAL_MODE:
                 "priority": str(message.priority),
             }
 
-            future = self.publisher.publish(topic_path, message_data, **attributes)
+            future = self.publisher.publish(
+                topic_path,
+                message_data,
+                ordering_key=message.task_id,
+                **attributes,
+            )
             message_id = future.result()
             logger.info("Published message %s to %s", message_id, topic_name)
             return message_id

@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 import json
 from dotenv import load_dotenv
@@ -47,6 +47,7 @@ class TaskResponse(BaseModel):
     status: str
     message: str
     estimated_time_seconds: int = 30
+    trace_id: str
 
 class TaskStatusResponse(BaseModel):
     task_id: str
@@ -54,7 +55,8 @@ class TaskStatusResponse(BaseModel):
     progress: float
     subtasks: List[Dict[str, Any]]
     result: Optional[str] = None
-    errors: List[str] = []
+    errors: List[str] = Field(default_factory=list)
+    trace_id: str
 
 # Orchestrator logic
 
@@ -125,7 +127,7 @@ class Orchestrator:
 
         # Save initial context
         self.firestore.save_task_context(context)
-        logger.info(f"Created task: {context.task_id}")
+        logger.info("Created task %s trace=%s", context.task_id, context.trace_id)
         
         try:
             # Use Gemini to decompose the task
@@ -155,7 +157,7 @@ class Orchestrator:
                     await self.dispatch_subtask(subtask)
                     
         except Exception as e:
-            logger.error(f"Failed to process query: {e}")
+            logger.error("Failed to process task %s trace=%s: %s", context.task_id, context.trace_id, e)
             context.status = TaskStatus.FAILED
             context.errors.append({
                 'timestamp': datetime.utcnow().isoformat(),
@@ -168,7 +170,12 @@ class Orchestrator:
     async def dispatch_subtask(self, subtask: SubTask) -> None:
         """Dispatch a subtask to the appropriate agent"""
         
-        logger.info(f"Dispatching subtask {subtask.subtask_id} to {subtask.agent_type.value}")
+        logger.info(
+            "Dispatching subtask %s for task %s to %s",
+            subtask.subtask_id,
+            subtask.parent_task_id,
+            subtask.agent_type.value,
+        )
         
         # Create message for the agent
         message = AgentMessage(
@@ -194,7 +201,12 @@ class Orchestrator:
             self.firestore.save_subtask(subtask)
             
         except Exception as e:
-            logger.error(f"Failed to dispatch subtask: {e}")
+            logger.error(
+                "Failed to dispatch subtask %s for task %s: %s",
+                subtask.subtask_id,
+                subtask.parent_task_id,
+                e,
+            )
             subtask.status = TaskStatus.FAILED
             subtask.error = str(e)
             self.firestore.save_subtask(subtask)
@@ -208,7 +220,12 @@ class Orchestrator:
         result = message_data.get('result')
         error = message_data.get('error')
         
-        logger.info(f"Received result from {agent_type} for subtask {subtask_id}")
+        logger.info(
+            "Received result from %s for subtask %s (task %s)",
+            agent_type,
+            subtask_id,
+            task_id,
+        )
         
         subtask_obj = self.firestore.get_subtask(subtask_id)
         if subtask_obj:
@@ -274,7 +291,7 @@ class Orchestrator:
             context.status = TaskStatus.COMPLETED
             self.firestore.save_task_context(context)
             
-            logger.info(f"Task {task_id} completed successfully")
+            logger.info("Task %s completed successfully (trace=%s)", task_id, context.trace_id)
             
             # Optionally notify via webhook or email
             await self.send_completion_notification(context)
@@ -309,7 +326,7 @@ class Orchestrator:
     async def send_completion_notification(self, context: TaskContext) -> None:
         """Send notification when task is complete"""
         # This could send email, webhook, or push notification
-        logger.info(f"Task {context.task_id} completed. Result ready for user.")
+        logger.info("Task %s (trace=%s) completed. Result ready for user.", context.task_id, context.trace_id)
 
 # Initialize orchestrator
 orchestrator = Orchestrator()
@@ -346,11 +363,12 @@ async def create_task(request: TaskRequest, background_tasks: BackgroundTasks):
             task_id=context.task_id,
             status="accepted",
             message="Task accepted for processing",
-            estimated_time_seconds=30
+            estimated_time_seconds=30,
+            trace_id=context.trace_id,
         )
         
     except Exception as e:
-        logger.error(f"Failed to create task: {e}")
+        logger.error("Failed to create task for query '%s': %s", request.query, e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tasks/{task_id}", response_model=TaskStatusResponse)
@@ -374,7 +392,8 @@ async def get_task_status(task_id: str):
         progress=progress,
         subtasks=[st.to_dict() for st in subtasks],
         result=context.final_result,
-        errors=[e.get('error', '') for e in context.errors]
+        errors=[e.get('error', '') for e in context.errors],
+        trace_id=context.trace_id,
     )
 
 @app.post("/tasks/{task_id}/cancel")
@@ -408,7 +427,7 @@ async def handle_agent_result(data: Dict[str, Any]):
         await orchestrator.handle_agent_result(data)
         return {"status": "success"}
     except Exception as e:
-        logger.error(f"Failed to handle agent result: {e}")
+        logger.error("Failed to handle agent result payload %s: %s", data, e)
         raise HTTPException(status_code=500, detail=str(e))
 
 # Health check endpoint

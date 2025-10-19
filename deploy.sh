@@ -126,7 +126,14 @@ topics=(
   "agent-validator-tasks"
 )
 for topic in "${topics[@]}"; do
-  gcloud pubsub topics create "${topic}" --project "${PROJECT_ID}" >/dev/null 2>&1 || true
+  gcloud pubsub topics create "${topic}" \
+    --project "${PROJECT_ID}" \
+    --message-ordering \
+    >/dev/null 2>&1 || true
+  gcloud pubsub topics update "${topic}" \
+    --project "${PROJECT_ID}" \
+    --message-ordering \
+    >/dev/null 2>&1 || true
 done
 
 # --- Cloud Tasks Queue ------------------------------------------------------
