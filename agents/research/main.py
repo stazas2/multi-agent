@@ -27,7 +27,8 @@ bigquery_client = bigquery.Client(project=project_id)
 
 # Initialize Gemini
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
-model = genai.GenerativeModel('gemini-1.5-flash')
+MODEL_NAME = os.environ.get('GEMINI_MODEL', 'gemini-2.5-pro')
+model = genai.GenerativeModel(MODEL_NAME)
 
 class ResearchAgent:
     """Agent specialized in research and information gathering"""

@@ -57,6 +57,38 @@ class TaskStatusResponse(BaseModel):
     errors: List[str] = []
 
 # Orchestrator logic
+
+AGENT_TYPE_ALIASES = {
+    "orchestrator": AgentType.ORCHESTRATOR,
+    "research": AgentType.RESEARCH,
+    "research agent": AgentType.RESEARCH,
+    "researcher": AgentType.RESEARCH,
+    "analysis": AgentType.ANALYSIS,
+    "analysis agent": AgentType.ANALYSIS,
+    "analyst": AgentType.ANALYSIS,
+    "code": AgentType.CODE,
+    "code agent": AgentType.CODE,
+    "coder": AgentType.CODE,
+    "developer": AgentType.CODE,
+    "validator": AgentType.VALIDATOR,
+    "validator agent": AgentType.VALIDATOR,
+    "validation": AgentType.VALIDATOR,
+}
+
+
+def resolve_agent_type(agent_type_value: Any) -> AgentType:
+    """Map incoming agent identifiers to AgentType enum."""
+    if isinstance(agent_type_value, AgentType):
+        return agent_type_value
+
+    if isinstance(agent_type_value, str):
+        normalized = " ".join(agent_type_value.strip().lower().replace("_", " ").replace("-", " ").split())
+        if normalized in AGENT_TYPE_ALIASES:
+            return AGENT_TYPE_ALIASES[normalized]
+
+    raise ValueError(f"Unsupported agent type: {agent_type_value!r}")
+
+
 class Orchestrator:
     """Main orchestrator that coordinates agent activities"""
     
@@ -104,7 +136,7 @@ class Orchestrator:
             for idx, subtask_data in enumerate(subtasks_data):
                 subtask = SubTask(
                     parent_task_id=context.task_id,
-                    agent_type=AgentType(subtask_data['agent_type']),
+                    agent_type=resolve_agent_type(subtask_data['agent_type']),
                     description=subtask_data['description'],
                     parameters=subtask_data.get('parameters', {}),
                     dependencies=[subtasks[i].subtask_id for i in subtask_data.get('dependencies', [])]

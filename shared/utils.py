@@ -356,7 +356,8 @@ if not LOCAL_MODE:
                 raise ValueError("Gemini API key not provided")
 
             genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel("gemini-1.5-pro")
+            model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+            self.model = genai.GenerativeModel(model_name)
 
         def decompose_task(self, user_query: str) -> List[Dict[str, Any]]:
             prompt = f"""
