@@ -7,6 +7,8 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
+import json
+from dotenv import load_dotenv
 
 # Import shared utilities and models
 from shared.models import (
@@ -22,20 +24,23 @@ from shared.utils import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Load environment variables from .env if present (useful for local mode)
+load_dotenv()
+
 # Initialize FastAPI app
 app = FastAPI(title="Multi-Agent Orchestrator")
 
 # Initialize managers
 project_id = os.environ.get('PROJECT_ID', 'your-project-id')
 firestore_manager = FirestoreManager(project_id)
-pubsub_manager = PubSubManager(project_id)
+pubsub_manager = PubSubManager(project_id, firestore_manager=firestore_manager)
 tasks_manager = CloudTasksManager(project_id)
 gemini_manager = GeminiManager()
 
 # Request/Response models
 class TaskRequest(BaseModel):
     query: str
-    metadata: Optional[Dict[str, Any]] = {}
+    metadata: Optional[Dict[str, Any]] = None
 
 class TaskResponse(BaseModel):
     task_id: str
@@ -60,17 +65,32 @@ class Orchestrator:
         self.pubsub = pubsub_manager
         self.tasks = tasks_manager
         self.gemini = gemini_manager
+        # In LOCAL_MODE the Pub/Sub manager delivers results via callback
+        if hasattr(self.pubsub, "register_result_handler"):
+            self.pubsub.register_result_handler(self.handle_agent_result)
         
-    async def process_user_query(self, query: str, metadata: Dict[str, Any] = {}) -> TaskContext:
+    async def process_user_query(
+        self,
+        query: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        context: Optional[TaskContext] = None
+    ) -> TaskContext:
         """Process a new user query"""
-        
-        # Create new task context
-        context = TaskContext(
-            user_query=query,
-            metadata=metadata,
-            status=TaskStatus.IN_PROGRESS
-        )
-        
+
+        metadata = metadata or {}
+
+        # Create or update task context
+        if context is None:
+            context = TaskContext(
+                user_query=query,
+                metadata=metadata,
+                status=TaskStatus.IN_PROGRESS
+            )
+        else:
+            context.user_query = query
+            context.metadata = metadata or context.metadata
+            context.status = TaskStatus.IN_PROGRESS
+
         # Save initial context
         self.firestore.save_task_context(context)
         logger.info(f"Created task: {context.task_id}")
@@ -158,30 +178,22 @@ class Orchestrator:
         
         logger.info(f"Received result from {agent_type} for subtask {subtask_id}")
         
-        # Update subtask
-        subtask = self.firestore.db.collection('subtasks').document(subtask_id).get()
-        if subtask.exists:
-            subtask_data = subtask.to_dict()
-            subtask_obj = SubTask.from_dict(subtask_data)
-            
+        subtask_obj = self.firestore.get_subtask(subtask_id)
+        if subtask_obj:
             if error:
                 subtask_obj.status = TaskStatus.FAILED
                 subtask_obj.error = error
             else:
                 subtask_obj.status = TaskStatus.COMPLETED
                 subtask_obj.result = result
-                
+
             subtask_obj.completed_at = datetime.utcnow()
             self.firestore.save_subtask(subtask_obj)
-            
-            # Update agent results in task context
+
             if result:
                 self.firestore.update_agent_result(task_id, agent_type, result)
-                
-            # Check if we can dispatch dependent tasks
+
             await self.check_and_dispatch_dependencies(task_id, subtask_id)
-            
-            # Check if all subtasks are complete
             await self.check_task_completion(task_id)
             
     async def check_and_dispatch_dependencies(self, task_id: str, completed_subtask_id: str) -> None:
@@ -279,16 +291,27 @@ async def root():
 async def create_task(request: TaskRequest, background_tasks: BackgroundTasks):
     """Create a new task"""
     try:
+        metadata = request.metadata or {}
+
+        # Prepare context upfront so we can return task_id immediately
+        context = TaskContext(
+            user_query=request.query,
+            metadata=metadata,
+            status=TaskStatus.PENDING
+        )
+        orchestrator.firestore.save_task_context(context)
+
         # Process in background
         background_tasks.add_task(
             orchestrator.process_user_query,
             request.query,
-            request.metadata
+            metadata,
+            context
         )
         
-        # Return immediate response
+        # Return immediate response with task details
         return TaskResponse(
-            task_id="",  # Will be generated in background
+            task_id=context.task_id,
             status="accepted",
             message="Task accepted for processing",
             estimated_time_seconds=30

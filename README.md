@@ -91,6 +91,37 @@ graph TB
 5. **Python 3.11+** installed
 6. **Gemini API Key** from Google AI Studio
 
+### Local quickstart (no GCP required)
+
+If you just want to try the orchestrator flow locally without provisioning any Google Cloud resources:
+
+1. Copy `.env.local.example` to `.env` and adjust the values if you want a different `PROJECT_ID` or port:
+   ```bash
+   cp .env.local.example .env
+   ```
+   Environment variables:
+   - `LOCAL_MODE` — must be `1` to enable the in-memory stores and stubbed agents.
+   - `PROJECT_ID` — any string, used only for logging in local mode.
+   - `PORT` — port for the FastAPI server (default `8080`).
+2. Ensure Python 3.11 is available. On Windows use `py -3.11 -m venv .venv`; on macOS/Linux run `python3.11 -m venv .venv`.
+3. Activate the virtual environment and install orchestrator dependencies:
+   ```bash
+   source .venv/bin/activate         # On Windows: .\.venv\Scripts\Activate.ps1
+   pip install -r orchestrator/requirements.txt
+   ```
+4. Run the orchestrator API:
+   ```bash
+   uvicorn orchestrator.main:app --reload --port ${PORT:-8080}
+   ```
+5. Submit a demo task:
+   ```bash
+   curl -X POST http://localhost:8080/tasks \
+     -H "Content-Type: application/json" \
+     -d '{"query": "Summarise three new AI research breakthroughs"}'
+   ```
+
+In `LOCAL_MODE` all Google Cloud services and Gemini calls are replaced with fast in-process mocks, so you don't need a service account or API keys. The response is synthetic but follows the same structure as the cloud deployment.
+
 ### Step 1: Clone Repository
 
 ```bash
@@ -109,6 +140,17 @@ export REGION="us-central1"
 gcloud auth login
 gcloud config set project $PROJECT_ID
 ```
+
+#### Required environment variables (cloud deployment)
+
+| Variable | Purpose | Where to get it |
+|----------|---------|-----------------|
+| `PROJECT_ID` | Target Google Cloud project | `gcloud projects list` or Cloud Console |
+| `REGION` | Region for Cloud Run/Functions (e.g. `us-central1`) | Choose any supported region |
+| `GEMINI_API_KEY` | Access token for Gemini API | [Google AI Studio](https://ai.google.dev/) → *Get API key* |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service-account JSON with Firestore/PubSub/Tasks access | Create in Cloud Console → IAM & Admin → Service Accounts |
+
+These variables are loaded automatically if you place them in a `.env` file (thanks to `python-dotenv`) or export them in your shell before running deployments/tests.
 
 ### Step 3: Set Up Secrets
 

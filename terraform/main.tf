@@ -6,6 +6,11 @@ variable "region" {
   default = "us-central1"
 }
 
+provider "google" {
+  project = var.project_id
+  region  = var.region
+}
+
 # Enable required APIs
 resource "google_project_service" "required_apis" {
   for_each = toset([
@@ -83,7 +88,7 @@ resource "google_service_account" "agent_sa" {
 # IAM permissions for Service Account
 resource "google_project_iam_member" "agent_permissions" {
   for_each = toset([
-    "roles/firestore.user",
+    "roles/datastore.user",
     "roles/pubsub.publisher",
     "roles/pubsub.subscriber",
     "roles/cloudtasks.enqueuer",

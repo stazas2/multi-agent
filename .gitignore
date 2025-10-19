@@ -1,0 +1,16 @@
+.venv
+.env
+.env.*
+agents/*/function.zip
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

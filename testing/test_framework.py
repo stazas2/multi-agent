@@ -11,6 +11,8 @@ from datetime import datetime
 from unittest.mock import Mock, patch, MagicMock
 import requests
 from dataclasses import dataclass
+import aiohttp
+import pandas as pd
 
 # Import our modules (assuming they're in the path)
 from shared.models import TaskContext, TaskStatus, AgentType, SubTask, AgentMessage
