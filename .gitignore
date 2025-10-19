@@ -24,3 +24,7 @@ __pycache__/
 *.log
 .DS_Store
 Thumbs.db
+web/node_modules/
+web/dist/
+web/node_modules/
+web/dist/

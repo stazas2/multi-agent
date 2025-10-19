@@ -31,6 +31,7 @@ ensure_command() {
 
 ensure_command gcloud
 ensure_command python
+ensure_command npm
 
 # --- Configuration ----------------------------------------------------------
 
@@ -170,6 +171,18 @@ else
 fi
 
 # --- Build and Deploy Orchestrator ------------------------------------------
+
+# --- Frontend Build ---------------------------------------------------------
+
+if [[ -d "web" ]]; then
+  log "Building frontend bundle"
+  pushd web >/dev/null
+  npm ci
+  npm run build
+  popd >/dev/null
+else
+  log "Skipping frontend build (web directory not found)"
+fi
 
 log "Building orchestrator container via Cloud Build"
 gcloud builds submit . \

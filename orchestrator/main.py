@@ -3,8 +3,11 @@ import logging
 import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import uvicorn
 import json
@@ -29,6 +32,33 @@ load_dotenv()
 
 # Initialize FastAPI app
 app = FastAPI(title="Multi-Agent Orchestrator")
+
+# Configure CORS to enable UI integrations
+allowed_origins = os.environ.get("ALLOWED_ORIGINS", "*")
+if allowed_origins.strip() == "*":
+    cors_origins = ["*"]
+else:
+    cors_origins = [origin.strip() for origin in allowed_origins.split(",") if origin.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve compiled frontend bundle if available
+_frontend_candidates = [
+    Path(__file__).resolve().parent / "frontend",
+    Path(__file__).resolve().parent.parent / "web" / "dist"
+]
+
+for candidate in _frontend_candidates:
+    if candidate.exists():
+        logger.info("Serving frontend assets from %s", candidate)
+        app.mount("/ui", StaticFiles(directory=candidate, html=True), name="ui")
+        break
 
 # Initialize managers
 project_id = os.environ.get('PROJECT_ID', 'your-project-id')
