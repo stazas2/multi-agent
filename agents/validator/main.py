@@ -233,6 +233,7 @@ class ValidatorAgent:
         suggestions = []
         
         package_data = output.get('package')
+        has_package = False
         if package_data:
             try:
                 if isinstance(package_data, str):
@@ -264,11 +265,13 @@ class ValidatorAgent:
 
                 if not package_payload.get('instructions'):
                     suggestions.append("Package is missing run instructions")
+                has_package = True
             except Exception as exc:
                 issues.append(f"Invalid package payload: {exc}")
-        
+                has_package = False
+
         # Check for code content
-        if 'code' not in output and 'code_blocks' not in output and not package:
+        if 'code' not in output and 'code_blocks' not in output and not has_package:
             issues.append("No code provided in output")
             
         # Validate code syntax if present
@@ -287,7 +290,7 @@ class ValidatorAgent:
                     suggestions.append("Consider organizing code into functions or classes")
                     
         # Check for explanation
-        if 'explanation' not in output and 'description' not in output and not package:
+        if 'explanation' not in output and 'description' not in output and not has_package:
             suggestions.append("Add explanation for the generated code")
             
         confidence = 1.0 - (len(issues) * 0.25)

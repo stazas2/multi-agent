@@ -582,3 +582,83 @@ details pre {
   color: rgba(226, 232, 240, 0.92);
   font-size: 0.9rem;
 }
+.history-container {
+  display: block;
+}
+
+.history-container summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 1.05rem;
+  margin-bottom: 0.9rem;
+  outline: none;
+}
+
+.history-container summary::marker {
+  color: rgba(148, 163, 184, 0.9);
+}
+
+.history-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.6rem;
+  align-items: center;
+  padding: 0.8rem 1rem;
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px solid rgba(71, 85, 105, 0.55);
+  border-radius: 0.85rem;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.history-item:hover {
+  border-color: rgba(129, 140, 248, 0.6);
+}
+
+.history-item.active {
+  border-color: rgba(129, 140, 248, 0.9);
+  background: rgba(30, 64, 175, 0.35);
+}
+
+.history-item__title {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+.history-item__status {
+  justify-self: flex-end;
+  font-size: 0.78rem;
+}
+
+.history-item__date {
+  font-size: 0.75rem;
+  color: rgba(148, 163, 184, 0.85);
+  justify-self: flex-end;
+}
+
+.history-item__tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.2);
+  color: rgba(187, 247, 208, 0.95);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+}
+
+.history-item__preview {
+  grid-column: 1 / -1;
+  font-size: 0.78rem;
+  color: rgba(226, 232, 240, 0.75);
+  max-height: 3.6rem;
+  overflow: hidden;
+}

@@ -91,6 +91,21 @@ class TaskStatusResponse(BaseModel):
     events: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class TaskSummary(BaseModel):
+    task_id: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    progress: float
+    has_artifacts: bool
+    result_preview: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskListResponse(BaseModel):
+    items: List[TaskSummary]
+
+
 class ManualActionRequest(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=500)
 
@@ -558,6 +573,36 @@ orchestrator = Orchestrator()
 @app.get("/")
 async def root():
     return {"message": "Multi-Agent Orchestrator is running"}
+
+@app.get("/tasks", response_model=TaskListResponse)
+async def list_tasks(limit: int = 20):
+    """List recent tasks with summary information"""
+    limit = max(1, min(limit, 100))
+    contexts = orchestrator.firestore.list_recent_tasks(limit)
+    summaries: List[TaskSummary] = []
+
+    for context in contexts:
+        subtask_records: List[Dict[str, Any]] = context.subtasks or []  # type: ignore[assignment]
+        total = len(subtask_records)
+        completed = sum(
+            1 for record in subtask_records
+            if (record.get("status") or "").lower() in {"completed", "failed"}
+        )
+        progress = (completed / total * 100) if total > 0 else 0.0
+        summaries.append(
+            TaskSummary(
+                task_id=context.task_id,
+                status=context.status.value if isinstance(context.status, TaskStatus) else str(context.status),
+                created_at=context.created_at,
+                updated_at=context.updated_at,
+                progress=progress,
+                has_artifacts=bool((context.artifacts or {}).get("packages")),
+                result_preview=context.final_result[:200] if context.final_result else None,
+                metadata=context.metadata or {},
+            )
+        )
+
+    return TaskListResponse(items=summaries)
 
 @app.post("/tasks", response_model=TaskResponse)
 async def create_task(request: TaskRequest, background_tasks: BackgroundTasks):

@@ -227,6 +227,15 @@ if not LOCAL_MODE:
             })
             logger.info("Updated %s results for task %s", agent_type, task_id)
 
+        def list_recent_tasks(self, limit: int = 20) -> List[TaskContext]:
+            limit = max(1, min(limit, 100))
+            query = (
+                self.db.collection("tasks")
+                .order_by("updated_at", direction=firestore.Query.DESCENDING)
+                .limit(limit)
+            )
+            return [TaskContext.from_dict(doc.to_dict()) for doc in query.stream()]
+
 else:
 
     class FirestoreManager:
@@ -291,6 +300,15 @@ else:
                 ctx.agent_results[agent_type] = result
                 self.save_task_context(ctx)
                 logger.debug("[LOCAL] Updated %s results for task %s", agent_type, task_id)
+
+        def list_recent_tasks(self, limit: int = 20) -> List[TaskContext]:
+            limit = max(1, min(limit, 100))
+            contexts = sorted(
+                self.tasks.values(),
+                key=lambda ctx: ctx.updated_at,
+                reverse=True,
+            )
+            return [TaskContext.from_dict(ctx.to_dict()) for ctx in contexts[:limit]]
 
 
 # === Pub/Sub Management ================================================================
