@@ -70,6 +70,24 @@ def test_multi_agent_system(orchestrator_url: str):
             print("\nSubtask Details:")
             for subtask in status_data.get('subtasks', []):
                 print(f"  - {subtask['agent_type']}: {subtask['status']}")
+            
+            artifacts = status_data.get('artifacts', {}) or {}
+            packages = artifacts.get('packages') or []
+            if packages:
+                print("\nGenerated Packages:")
+                for package in packages:
+                    agent = package.get('agent')
+                    storage = (package.get('artifact') or {}).get('storage')
+                    summary = package.get('summary') or ''
+                    print(f"  - {agent} -> {storage} {summary}".strip())
+
+            events = status_data.get('events') or []
+            if events:
+                print("\nRecent Events:")
+                for event in events[-5:]:
+                    action = event.get('action') or event.get('status')
+                    subtask = event.get('subtask_id', 'n/a')
+                    print(f"  - {action} (subtask={subtask})")
                 
             break
             

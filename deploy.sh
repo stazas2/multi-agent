@@ -52,6 +52,28 @@ fi
 SERVICE_ACCOUNT="multi-agent-system@${PROJECT_ID}.iam.gserviceaccount.com"
 REPOSITORY="agent-images"
 ORCHESTRATOR_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/orchestrator:latest"
+ORCHESTRATOR_ENV_VARS=("PROJECT_ID=${PROJECT_ID}")
+FUNCTION_ENV_VARS=("PROJECT_ID=${PROJECT_ID}")
+
+append_optional_env() {
+  local name="$1"
+  local target_array="$2"
+  local value="${!name:-}"
+  if [[ -n "${value}" ]]; then
+    eval "${target_array}+=(\"${name}=${value}\")"
+  fi
+}
+
+append_optional_env MODEL_ORCHESTRATOR ORCHESTRATOR_ENV_VARS
+append_optional_env MODEL_RESEARCH ORCHESTRATOR_ENV_VARS
+append_optional_env MODEL_ANALYSIS ORCHESTRATOR_ENV_VARS
+append_optional_env MODEL_CODE ORCHESTRATOR_ENV_VARS
+append_optional_env MODEL_VALIDATOR ORCHESTRATOR_ENV_VARS
+append_optional_env MODEL_RESEARCH FUNCTION_ENV_VARS
+append_optional_env MODEL_ANALYSIS FUNCTION_ENV_VARS
+append_optional_env MODEL_CODE FUNCTION_ENV_VARS
+append_optional_env MODEL_VALIDATOR FUNCTION_ENV_VARS
+append_optional_env PACKAGE_ARCHIVE_BUCKET ORCHESTRATOR_ENV_VARS
 
 log "Deploying Multi-Agent System"
 log "Project: ${PROJECT_ID}"
@@ -190,12 +212,13 @@ gcloud builds submit . \
   --project "${PROJECT_ID}"
 
 log "Deploying orchestrator to Cloud Run"
+ORCH_ENV_STRING=$( (IFS=","; printf "%s" "${ORCHESTRATOR_ENV_VARS[*]}"))
 gcloud run deploy orchestrator-service \
   --image "${ORCHESTRATOR_IMAGE}" \
   --region "${REGION}" \
   --platform managed \
   --allow-unauthenticated \
-  --set-env-vars PROJECT_ID="${PROJECT_ID}" \
+  --set-env-vars "${ORCH_ENV_STRING}" \
   --update-secrets GEMINI_API_KEY=gemini-api-key:latest \
   --service-account "${SERVICE_ACCOUNT}" \
   --project "${PROJECT_ID}"
@@ -213,6 +236,9 @@ log "Orchestrator URL: ${ORCHESTRATOR_URL}"
 deploy_function() {
   local name="$1"
   local topic="$2"
+  local env_vars=("${FUNCTION_ENV_VARS[@]}" "ORCHESTRATOR_URL=${ORCHESTRATOR_URL}")
+  local env_string
+  env_string=$( (IFS=","; printf "%s" "${env_vars[*]}"))
   pushd "agents/${name}" >/dev/null
   gcloud functions deploy "${name}-agent" \
     --gen2 \
@@ -221,7 +247,7 @@ deploy_function() {
     --source . \
     --entry-point handle_message \
     --trigger-topic "${topic}" \
-    --set-env-vars PROJECT_ID="${PROJECT_ID}",ORCHESTRATOR_URL="${ORCHESTRATOR_URL}" \
+    --set-env-vars "${env_string}" \
     --set-secrets GEMINI_API_KEY=gemini-api-key:latest \
     --service-account "${SERVICE_ACCOUNT}" \
     --memory 1GB \

@@ -6,7 +6,7 @@ import os
 import json
 import logging
 import base64
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 import functions_framework
 from google.cloud import firestore
@@ -15,6 +15,111 @@ import ast
 import re
 from collections import defaultdict
 import requests
+
+from dataclasses import dataclass, field
+from pathlib import PurePosixPath
+
+
+def _resolve_agent_model(agent_key: str) -> str:
+    env_key = f"MODEL_{agent_key.upper()}"
+    return os.environ.get(env_key) or os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+
+
+def _normalise_path(path: str) -> str:
+    posix = PurePosixPath(path.replace("\\", "/"))
+    if posix.is_absolute():
+        raise ValueError("Generated asset path must be relative")
+
+    parts: List[str] = []
+    for part in posix.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            raise ValueError("Generated asset path cannot traverse upwards ('..')")
+        parts.append(part)
+    if not parts:
+        raise ValueError("Generated asset path must contain at least one segment")
+    return "/".join(parts)
+
+
+@dataclass
+class GeneratedAsset:
+    path: str
+    content: str
+    executable: bool = False
+    media_type: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.path = _normalise_path(self.path)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "path": self.path,
+            "content": self.content,
+            "executable": self.executable,
+            "media_type": self.media_type,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GeneratedAsset":
+        return cls(
+            path=data.get("path", ""),
+            content=data.get("content", ""),
+            executable=bool(data.get("executable", False)),
+            media_type=data.get("media_type"),
+        )
+
+
+@dataclass
+class GeneratedPackage:
+    files: List[GeneratedAsset] = field(default_factory=list)
+    name: str = "code-package"
+    entrypoint: Optional[str] = None
+    instructions: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            self.name = "code-package"
+        self.validate()
+
+    def validate(self) -> None:
+        seen: Dict[str, GeneratedAsset] = {}
+        for asset in self.files:
+            if asset.path in seen:
+                raise ValueError(f"Duplicate generated asset path: {asset.path}")
+            seen[asset.path] = asset
+
+        if self.entrypoint:
+            normalised_entry = _normalise_path(self.entrypoint)
+            if normalised_entry not in seen:
+                raise ValueError("Package entrypoint must reference an existing file")
+            self.entrypoint = normalised_entry
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "files": [asset.to_dict() for asset in self.files],
+            "entrypoint": self.entrypoint,
+            "instructions": self.instructions,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GeneratedPackage":
+        raw_files = data.get("files", [])
+        files = [
+            asset if isinstance(asset, GeneratedAsset) else GeneratedAsset.from_dict(asset)
+            for asset in raw_files
+        ]
+        package = cls(
+            files=files,
+            name=data.get("name", "code-package"),
+            entrypoint=data.get("entrypoint"),
+            instructions=data.get("instructions"),
+            metadata=data.get("metadata", {}),
+        )
+        return package
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +131,7 @@ firestore_client = firestore.Client(project=project_id)
 
 # Initialize Gemini
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
-MODEL_NAME = os.environ.get('GEMINI_MODEL', 'gemini-2.5-pro')
+MODEL_NAME = _resolve_agent_model("CODE")
 model = genai.GenerativeModel(MODEL_NAME)
 ORCHESTRATOR_URL = os.environ.get('ORCHESTRATOR_URL', '').rstrip('/')
 LOCAL_MODE = str(os.environ.get("LOCAL_MODE", "0")).lower() in {"1", "true", "yes"}
@@ -134,51 +239,124 @@ class CodeAgent:
         
         language = parameters.get('language', 'python')
         framework = parameters.get('framework', '')
+        package_requested = bool(parameters.get('package'))
         
         # Build context from other agents
         agent_results = context.get('agent_results', {})
         
-        prompt = f"""
-        Generate code for: {description}
-        
-        Language: {language}
-        Framework: {framework if framework else 'any appropriate'}
-        
-        Context from research:
-        {json.dumps(agent_results.get('research', {}), indent=2)[:2000]}
-        
-        Requirements:
-        {json.dumps(parameters.get('requirements', []), indent=2)}
-        
-        Generate clean, well-commented, production-ready code.
-        Include error handling and best practices.
-        """
+        base_context = json.dumps(agent_results.get('research', {}), indent=2)[:2000]
+        requirements = json.dumps(parameters.get('requirements', []), indent=2)
+
+        if package_requested:
+            prompt = f"""
+            You are generating a multi-file project for the following request:
+            {description}
+
+            Target language: {language}
+            Preferred framework: {framework if framework else 'any appropriate'}
+
+            Research context:
+            {base_context}
+
+            Explicit requirements:
+            {requirements}
+
+            Return ONLY valid JSON with this structure:
+            {{
+              "summary": "<one paragraph description>",
+              "package": {{
+                "name": "<short name>",
+                "entrypoint": "<relative path to main file>",
+                "instructions": "<how to run the project>",
+                "metadata": {{}},
+                "files": [
+                  {{"path": "src/main.py", "content": "...", "executable": false}}
+                ]
+              }}
+            }}
+            Each file content must be UTF-8 text. Do not include markdown fences.
+            """
+        else:
+            prompt = f"""
+            Generate code for: {description}
+
+            Language: {language}
+            Framework: {framework if framework else 'any appropriate'}
+
+            Context from research:
+            {base_context}
+
+            Requirements:
+            {requirements}
+
+            Generate clean, well-commented, production-ready code.
+            Include error handling and best practices.
+            """
         
         try:
             response = self.gemini.generate_content(prompt)
-            
-            # Extract code from response
-            code_blocks = self.extract_code_blocks(response.text)
-            
+        except Exception as e:
+            logger.error(f"Code generation failed: {e}")
+            if package_requested:
+                package, summary = self.build_fallback_package("", language, description, note=str(e))
+                return self.build_package_result(
+                    package,
+                    summary,
+                    language,
+                    framework,
+                    description,
+                    notes={"error": str(e)},
+                )
             return {
                 'type': 'code_generation',
                 'description': description,
                 'language': language,
                 'framework': framework,
-                'code': code_blocks[0] if code_blocks else response.text,
-                'all_code_blocks': code_blocks,
-                'explanation': self.extract_explanation(response.text),
-                'timestamp': datetime.utcnow().isoformat()
-            }
-            
-        except Exception as e:
-            logger.error(f"Code generation failed: {e}")
-            return {
-                'type': 'code_generation',
                 'error': str(e),
                 'timestamp': datetime.utcnow().isoformat()
             }
-            
+
+        if package_requested:
+            try:
+                package, summary = self.parse_generated_package(
+                    response.text,
+                    description=description,
+                    language=language,
+                    framework=framework,
+                    parameters=parameters,
+                )
+                return self.build_package_result(package, summary, language, framework, description)
+            except Exception as parse_error:
+                logger.warning("Failed to parse package output: %s", parse_error)
+                package, summary = self.build_fallback_package(
+                    response.text,
+                    language,
+                    description,
+                    note=str(parse_error),
+                )
+                return self.build_package_result(
+                    package,
+                    summary,
+                    language,
+                    framework,
+                    description,
+                    notes={"warning": str(parse_error)},
+                )
+
+        # Non-package flow
+        code_blocks = self.extract_code_blocks(response.text)
+        
+        return {
+            'type': 'code_generation',
+            'description': description,
+            'language': language,
+            'framework': framework,
+            'code': code_blocks[0] if code_blocks else response.text,
+            'all_code_blocks': code_blocks,
+            'explanation': self.extract_explanation(response.text),
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
     def review_code(self, description: str, parameters: Dict[str, Any], 
                    context: Dict[str, Any]) -> Dict[str, Any]:
         """Review code for quality, security, and best practices"""
@@ -273,7 +451,111 @@ class CodeAgent:
                 'error': str(e),
                 'timestamp': datetime.utcnow().isoformat()
             }
-            
+
+    def parse_generated_package(
+        self,
+        response_text: str,
+        description: str,
+        language: str,
+        framework: str,
+        parameters: Dict[str, Any],
+    ) -> Tuple[GeneratedPackage, str]:
+        """Parse the LLM response into a GeneratedPackage."""
+        text = response_text.strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:]
+        payload = json.loads(text)
+        package_payload = payload.get("package", payload)
+        package = GeneratedPackage.from_dict(package_payload)
+        package.metadata.setdefault("language", language)
+        if framework:
+            package.metadata.setdefault("framework", framework)
+        if parameters.get("requirements"):
+            package.metadata.setdefault("requirements", parameters.get("requirements"))
+        summary = payload.get("summary") or package.instructions or description
+        package.validate()
+        return package, summary
+
+    def build_package_result(
+        self,
+        package: GeneratedPackage,
+        summary: str,
+        language: str,
+        framework: str,
+        description: str,
+        *,
+        notes: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Compose the response payload for a generated package."""
+        primary_asset = package.files[0] if package.files else None
+        code_blocks = [asset.content for asset in package.files]
+        result: Dict[str, Any] = {
+            'type': 'code_generation',
+            'description': description,
+            'language': language,
+            'framework': framework,
+            'code': primary_asset.content if primary_asset else '',
+            'all_code_blocks': code_blocks,
+            'package': package.to_dict(),
+            'summary': summary,
+            'explanation': summary,
+            'instructions': package.instructions,
+            'timestamp': datetime.utcnow().isoformat(),
+        }
+        if notes:
+            result['notes'] = notes
+        return result
+
+    def build_fallback_package(
+        self,
+        raw_text: str,
+        language: str,
+        description: str,
+        *,
+        note: Optional[str] = None,
+    ) -> Tuple[GeneratedPackage, str]:
+        """Create a minimal package when parsing fails."""
+        extension = self.guess_file_extension(language)
+        filename = f"main.{extension}" if extension else "main.txt"
+        content = raw_text or "# Unable to generate code content."
+        asset = GeneratedAsset(path=filename, content=content)
+        metadata = {"language": language, "fallback": True}
+        if note:
+            metadata["note"] = note
+        package = GeneratedPackage(
+            files=[asset],
+            entrypoint=asset.path,
+            instructions="Review and adjust the generated snippet.",
+            metadata=metadata,
+        )
+        summary = f"Fallback package generated for: {description}"
+        return package, summary
+
+    def guess_file_extension(self, language: str) -> str:
+        """Map language names to reasonable file extensions."""
+        mapping = {
+            'python': 'py',
+            'javascript': 'js',
+            'typescript': 'ts',
+            'go': 'go',
+            'rust': 'rs',
+            'java': 'java',
+            'csharp': 'cs',
+            'c++': 'cpp',
+            'c': 'c',
+            'bash': 'sh',
+            'shell': 'sh',
+            'html': 'html',
+            'css': 'css',
+            'kotlin': 'kt',
+            'swift': 'swift',
+            'ruby': 'rb',
+            'php': 'php',
+        }
+        return mapping.get(language.lower(), 'txt')
+
     def general_code_task(self, description: str, parameters: Dict[str, Any], 
                          context: Dict[str, Any]) -> Dict[str, Any]:
         """Handle general code-related tasks"""

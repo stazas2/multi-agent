@@ -4,7 +4,7 @@ import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -16,11 +16,11 @@ from dotenv import load_dotenv
 # Import shared utilities and models
 from shared.models import (
     TaskContext, TaskStatus, AgentType, 
-    AgentMessage, SubTask
+    AgentMessage, SubTask, GeneratedPackage
 )
 from shared.utils import (
     FirestoreManager, PubSubManager, 
-    CloudTasksManager, GeminiManager
+    CloudTasksManager, GeminiManager, create_package_artifact
 )
 
 # Configure logging
@@ -87,6 +87,16 @@ class TaskStatusResponse(BaseModel):
     result: Optional[str] = None
     errors: List[str] = Field(default_factory=list)
     trace_id: str
+    artifacts: Dict[str, Any] = Field(default_factory=dict)
+    events: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ManualActionRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+class SubtaskPriorityRequest(ManualActionRequest):
+    priority: int = Field(..., ge=0, le=100)
 
 # Orchestrator logic
 
@@ -129,9 +139,145 @@ class Orchestrator:
         self.pubsub = pubsub_manager
         self.tasks = tasks_manager
         self.gemini = gemini_manager
+        self.project_id = project_id
         # In LOCAL_MODE the Pub/Sub manager delivers results via callback
         if hasattr(self.pubsub, "register_result_handler"):
             self.pubsub.register_result_handler(self.handle_agent_result)
+
+    def _dependencies_completed(self, subtask: SubTask, subtasks: Optional[List[SubTask]] = None) -> bool:
+        """Check if all dependencies for a subtask are completed."""
+        if not subtask.dependencies:
+            return True
+
+        if subtasks is None:
+            subtasks = self.firestore.get_subtasks_for_task(subtask.parent_task_id)
+
+        subtask_map = {st.subtask_id: st for st in subtasks}
+        for dep_id in subtask.dependencies:
+            dep = subtask_map.get(dep_id)
+            if not dep or dep.status != TaskStatus.COMPLETED:
+                return False
+        return True
+
+    async def manual_retry_subtask(self, task_id: str, subtask_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
+        context = self.firestore.get_task_context(task_id)
+        if not context:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        subtask = self.firestore.get_subtask(subtask_id)
+        if not subtask or subtask.parent_task_id != task_id:
+            raise HTTPException(status_code=404, detail="Subtask not found")
+
+        if subtask.status == TaskStatus.IN_PROGRESS:
+            raise HTTPException(status_code=409, detail="Subtask currently in progress and cannot be retried")
+
+        previous_error = subtask.error or subtask.last_error
+        subtask.last_error = previous_error
+        subtask.error = None
+        subtask.result = None
+        subtask.status = TaskStatus.PENDING
+        subtask.started_at = None
+        subtask.completed_at = None
+        subtask.retry_count += 1
+        subtask.manual = True
+        subtask.manual_triggered_at = datetime.utcnow()
+
+        self.firestore.save_subtask(subtask)
+
+        action_note = reason or "Subtask manually retried"
+        context.errors.append({
+            'timestamp': datetime.utcnow().isoformat(),
+            'error': action_note,
+            'subtask_id': subtask_id,
+            'action': 'retry',
+            'retry_count': subtask.retry_count,
+        })
+        self.firestore.save_task_context(context)
+
+        subtasks = self.firestore.get_subtasks_for_task(task_id)
+        if self._dependencies_completed(subtask, subtasks):
+            await self.dispatch_subtask(subtask)
+            status = "queued"
+        else:
+            status = "pending_dependencies"
+
+        return {
+            "status": status,
+            "subtask_id": subtask_id,
+            "retry_count": subtask.retry_count,
+            "last_error": previous_error,
+        }
+
+    async def manual_cancel_subtask(self, task_id: str, subtask_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
+        context = self.firestore.get_task_context(task_id)
+        if not context:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        subtask = self.firestore.get_subtask(subtask_id)
+        if not subtask or subtask.parent_task_id != task_id:
+            raise HTTPException(status_code=404, detail="Subtask not found")
+
+        if subtask.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+            return {"status": subtask.status.value, "message": "Subtask already finished"}
+
+        subtask.status = TaskStatus.CANCELLED
+        subtask.error = reason or "Cancelled manually"
+        subtask.manual = True
+        subtask.manual_triggered_at = datetime.utcnow()
+        subtask.last_error = subtask.error
+
+        self.firestore.save_subtask(subtask)
+
+        context.errors.append({
+            'timestamp': datetime.utcnow().isoformat(),
+            'error': subtask.error,
+            'subtask_id': subtask_id,
+            'action': 'cancel',
+        })
+        self.firestore.save_task_context(context)
+
+        return {
+            "status": "cancelled",
+            "subtask_id": subtask_id,
+            "message": subtask.error,
+        }
+
+    async def manual_prioritize_subtask(
+        self,
+        task_id: str,
+        subtask_id: str,
+        priority: int,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        context = self.firestore.get_task_context(task_id)
+        if not context:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        subtask = self.firestore.get_subtask(subtask_id)
+        if not subtask or subtask.parent_task_id != task_id:
+            raise HTTPException(status_code=404, detail="Subtask not found")
+
+        old_priority = subtask.priority
+        subtask.priority = priority
+        subtask.manual = True
+        subtask.manual_triggered_at = datetime.utcnow()
+        self.firestore.save_subtask(subtask)
+
+        context.errors.append({
+            'timestamp': datetime.utcnow().isoformat(),
+            'error': reason or "Subtask priority changed",
+            'subtask_id': subtask_id,
+            'action': 'prioritize',
+            'priority': priority,
+        })
+        self.firestore.save_task_context(context)
+
+        return {
+            "status": "updated",
+            "subtask_id": subtask_id,
+            "old_priority": old_priority,
+            "new_priority": priority,
+        }
         
     async def process_user_query(
         self,
@@ -200,6 +346,14 @@ class Orchestrator:
     async def dispatch_subtask(self, subtask: SubTask) -> None:
         """Dispatch a subtask to the appropriate agent"""
         
+        if not self._dependencies_completed(subtask):
+            logger.info(
+                "Subtask %s for task %s is waiting on dependencies, skipping dispatch",
+                subtask.subtask_id,
+                subtask.parent_task_id,
+            )
+            return
+
         logger.info(
             "Dispatching subtask %s for task %s to %s",
             subtask.subtask_id,
@@ -215,10 +369,14 @@ class Orchestrator:
             payload={
                 'subtask_id': subtask.subtask_id,
                 'description': subtask.description,
-                'parameters': subtask.parameters
+                'parameters': subtask.parameters,
+                'priority': subtask.priority,
+                'retry_count': subtask.retry_count,
             },
             source_agent="orchestrator",
-            target_agent=subtask.agent_type.value
+            target_agent=subtask.agent_type.value,
+            priority=subtask.priority,
+            retry_count=subtask.retry_count,
         )
         
         # Publish to appropriate topic
@@ -239,6 +397,7 @@ class Orchestrator:
             )
             subtask.status = TaskStatus.FAILED
             subtask.error = str(e)
+            subtask.last_error = str(e)
             self.firestore.save_subtask(subtask)
             
     async def handle_agent_result(self, message_data: Dict[str, Any]) -> None:
@@ -259,9 +418,14 @@ class Orchestrator:
         
         subtask_obj = self.firestore.get_subtask(subtask_id)
         if subtask_obj:
+            if subtask_obj.status == TaskStatus.CANCELLED:
+                logger.info("Ignoring result for cancelled subtask %s", subtask_id)
+                return
+
             if error:
                 subtask_obj.status = TaskStatus.FAILED
                 subtask_obj.error = error
+                subtask_obj.last_error = error
             else:
                 subtask_obj.status = TaskStatus.COMPLETED
                 subtask_obj.result = result
@@ -331,14 +495,43 @@ class Orchestrator:
         
         # Gather all successful results
         results = []
+        packages_recorded = context.artifacts.get("packages")
+        packages_to_store: List[Dict[str, Any]] = [] if not packages_recorded else None
+
         for subtask in subtasks:
             if subtask.status == TaskStatus.COMPLETED and subtask.result:
+                payload = subtask.result
                 results.append({
                     'agent': subtask.agent_type.value,
                     'task': subtask.description,
-                    'result': subtask.result
+                    'result': payload
                 })
+
+                if packages_to_store is not None and isinstance(payload, dict) and payload.get('package'):
+                    try:
+                        package = GeneratedPackage.from_dict(payload['package'])
+                        artifact = create_package_artifact(
+                            package,
+                            self.project_id,
+                            prefix=subtask.parent_task_id,
+                        )
+                        packages_to_store.append({
+                            'agent': subtask.agent_type.value,
+                            'subtask_id': subtask.subtask_id,
+                            'summary': payload.get('summary'),
+                            'artifact': artifact,
+                            'created_at': datetime.utcnow().isoformat(),
+                        })
+                    except Exception as exc:
+                        logger.error("Failed to persist package for subtask %s: %s", subtask.subtask_id, exc)
+                        context.errors.append({
+                            'timestamp': datetime.utcnow().isoformat(),
+                            'error': f"Package processing failed for {subtask.subtask_id}: {exc}",
+                        })
                 
+        if packages_to_store:
+            context.artifacts['packages'] = packages_to_store
+
         # Use Gemini to synthesize the final response
         prompt = f"""
         User Query: {context.user_query}
@@ -424,6 +617,8 @@ async def get_task_status(task_id: str):
         result=context.final_result,
         errors=[e.get('error', '') for e in context.errors],
         trace_id=context.trace_id,
+        artifacts=context.artifacts,
+        events=context.errors,
     )
 
 @app.post("/tasks/{task_id}/cancel")
@@ -445,9 +640,36 @@ async def cancel_task(task_id: str):
     for subtask in subtasks:
         if subtask.status in [TaskStatus.PENDING, TaskStatus.IN_PROGRESS]:
             subtask.status = TaskStatus.CANCELLED
+            subtask.error = "Cancelled with parent task"
+            subtask.manual = True
+            subtask.manual_triggered_at = datetime.utcnow()
             orchestrator.firestore.save_subtask(subtask)
             
     return {"message": "Task cancelled successfully"}
+
+@app.post("/tasks/{task_id}/subtasks/{subtask_id}/retry")
+async def retry_subtask_endpoint(
+    task_id: str,
+    subtask_id: str,
+    payload: Optional[ManualActionRequest] = Body(default=None),
+):
+    return await orchestrator.manual_retry_subtask(task_id, subtask_id, payload.reason if payload else None)
+
+@app.post("/tasks/{task_id}/subtasks/{subtask_id}/cancel")
+async def cancel_subtask_endpoint(
+    task_id: str,
+    subtask_id: str,
+    payload: Optional[ManualActionRequest] = Body(default=None),
+):
+    return await orchestrator.manual_cancel_subtask(task_id, subtask_id, payload.reason if payload else None)
+
+@app.post("/tasks/{task_id}/subtasks/{subtask_id}/prioritize")
+async def prioritize_subtask_endpoint(
+    task_id: str,
+    subtask_id: str,
+    payload: SubtaskPriorityRequest,
+):
+    return await orchestrator.manual_prioritize_subtask(task_id, subtask_id, payload.priority, payload.reason)
 
 @app.post("/webhook/agent-result")
 async def handle_agent_result(data: Dict[str, Any]):

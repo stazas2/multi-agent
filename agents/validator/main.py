@@ -16,6 +16,11 @@ from dataclasses import dataclass
 import re
 import requests
 
+
+def _resolve_agent_model(agent_key: str) -> str:
+    env_key = f"MODEL_{agent_key.upper()}"
+    return os.environ.get(env_key) or os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,7 +31,7 @@ firestore_client = firestore.Client(project=project_id)
 
 # Initialize Gemini
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
-MODEL_NAME = os.environ.get('GEMINI_MODEL', 'gemini-2.5-pro')
+MODEL_NAME = _resolve_agent_model("VALIDATOR")
 model = genai.GenerativeModel(MODEL_NAME)
 ORCHESTRATOR_URL = os.environ.get('ORCHESTRATOR_URL', '').rstrip('/')
 LOCAL_MODE = str(os.environ.get("LOCAL_MODE", "0")).lower() in {"1", "true", "yes"}
@@ -227,8 +232,43 @@ class ValidatorAgent:
         issues = []
         suggestions = []
         
+        package_data = output.get('package')
+        if package_data:
+            try:
+                if isinstance(package_data, str):
+                    package_payload = json.loads(package_data)
+                else:
+                    package_payload = dict(package_data)
+
+                files = package_payload.get('files') or []
+                if not isinstance(files, list):
+                    raise ValueError("package.files must be a list")
+
+                seen_paths: set[str] = set()
+                for file_entry in files:
+                    if not isinstance(file_entry, dict):
+                        raise ValueError("package file entry must be an object")
+                    path = file_entry.get('path')
+                    content = file_entry.get('content')
+                    if not isinstance(path, str) or not path.strip():
+                        raise ValueError("package file missing path")
+                    if path in seen_paths:
+                        raise ValueError(f"duplicate file path: {path}")
+                    seen_paths.add(path)
+                    if not isinstance(content, str):
+                        raise ValueError(f"package file content must be string for {path}")
+
+                entrypoint = package_payload.get('entrypoint')
+                if entrypoint and entrypoint not in seen_paths:
+                    raise ValueError("package entrypoint not included in files")
+
+                if not package_payload.get('instructions'):
+                    suggestions.append("Package is missing run instructions")
+            except Exception as exc:
+                issues.append(f"Invalid package payload: {exc}")
+        
         # Check for code content
-        if 'code' not in output and 'code_blocks' not in output:
+        if 'code' not in output and 'code_blocks' not in output and not package:
             issues.append("No code provided in output")
             
         # Validate code syntax if present
@@ -247,7 +287,7 @@ class ValidatorAgent:
                     suggestions.append("Consider organizing code into functions or classes")
                     
         # Check for explanation
-        if 'explanation' not in output and 'description' not in output:
+        if 'explanation' not in output and 'description' not in output and not package:
             suggestions.append("Add explanation for the generated code")
             
         confidence = 1.0 - (len(issues) * 0.25)

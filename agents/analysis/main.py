@@ -17,6 +17,10 @@ from collections import Counter
 import statistics
 import requests
 
+def _resolve_agent_model(agent_key: str) -> str:
+    env_key = f"MODEL_{agent_key.upper()}"
+    return os.environ.get(env_key) or os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,7 +31,7 @@ firestore_client = firestore.Client(project=project_id)
 
 # Initialize Gemini
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
-MODEL_NAME = os.environ.get('GEMINI_MODEL', 'gemini-2.5-pro')
+MODEL_NAME = _resolve_agent_model("ANALYSIS")
 model = genai.GenerativeModel(MODEL_NAME)
 ORCHESTRATOR_URL = os.environ.get('ORCHESTRATOR_URL', '').rstrip('/')
 LOCAL_MODE = str(os.environ.get("LOCAL_MODE", "0")).lower() in {"1", "true", "yes"}

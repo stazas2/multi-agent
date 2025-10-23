@@ -409,3 +409,176 @@ details pre {
     grid-template-columns: 1fr;
   }
 }
+
+
+.subtask-meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: rgba(148, 163, 184, 0.85);
+}
+
+.manual-tag {
+  display: inline-block;
+  margin-top: 0.5rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.18);
+  color: #facc15;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.subtask-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.subtask-actions button {
+  background: rgba(59, 130, 246, 0.18);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  color: #bfdbfe;
+  padding: 0.45rem 0.9rem;
+  border-radius: 0.6rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.2s ease;
+}
+
+.subtask-actions button:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.3);
+}
+
+.subtask-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.package-grid {
+  display: grid;
+  gap: 1.25rem;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.package-card {
+  background: rgba(30, 41, 59, 0.55);
+  border: 1px solid rgba(71, 85, 105, 0.6);
+  border-radius: 0.9rem;
+  padding: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.package-card header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.package-name {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.package-summary {
+  margin: 0;
+  color: rgba(226, 232, 240, 0.85);
+  font-size: 0.9rem;
+}
+
+.package-details {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+.package-details code {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.8rem;
+  background: rgba(15, 23, 42, 0.8);
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.35rem;
+}
+
+.package-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.package-actions button {
+  align-self: flex-start;
+  background: rgba(34, 197, 94, 0.18);
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  color: #bbf7d0;
+  padding: 0.45rem 0.85rem;
+  border-radius: 0.6rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.package-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.package-note {
+  font-size: 0.75rem;
+  color: rgba(165, 180, 252, 0.85);
+}
+
+.events-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.events-list li {
+  display: grid;
+  grid-template-columns: 160px 130px minmax(0, 1fr);
+  gap: 1rem;
+  align-items: center;
+  background: rgba(30, 41, 59, 0.55);
+  border: 1px solid rgba(71, 85, 105, 0.6);
+  border-radius: 0.9rem;
+  padding: 0.85rem 1.1rem;
+}
+
+.event-time {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.75rem;
+  color: rgba(148, 163, 184, 0.85);
+}
+
+.event-action {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.78rem;
+  color: rgba(129, 140, 248, 0.9);
+}
+
+.event-subtask {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.75rem;
+  color: #f8fafc;
+}
+
+.event-message {
+  color: rgba(226, 232, 240, 0.92);
+  font-size: 0.9rem;
+}

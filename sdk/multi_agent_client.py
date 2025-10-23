@@ -7,8 +7,10 @@ import asyncio
 import json
 import time
 import logging
+import base64
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Callable, Union
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from enum import Enum
 import requests
@@ -38,11 +40,13 @@ class Task:
     status: TaskStatus
     progress: float = 0.0
     result: Optional[str] = None
-    errors: List[str] = None
-    subtasks: List[Dict[str, Any]] = None
+    errors: List[str] = field(default_factory=list)
+    subtasks: List[Dict[str, Any]] = field(default_factory=list)
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
-    metadata: Dict[str, Any] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    artifacts: Dict[str, Any] = field(default_factory=dict)
+    events: List[Dict[str, Any]] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
@@ -62,6 +66,11 @@ class Task:
             data['created_at'] = datetime.fromisoformat(data['created_at'])
         if data.get('completed_at'):
             data['completed_at'] = datetime.fromisoformat(data['completed_at'])
+        data['errors'] = data.get('errors', [])
+        data['subtasks'] = data.get('subtasks', [])
+        data['metadata'] = data.get('metadata', {})
+        data['artifacts'] = data.get('artifacts', {})
+        data['events'] = data.get('events', [])
         return cls(**data)
 
 @dataclass
@@ -113,6 +122,23 @@ class MultiAgentClient:
         self.ws = None
         self.ws_callbacks = {}
         self.ws_queue = Queue()
+
+    def _post(self, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Helper for POST requests with common error handling."""
+        url = f"{self.orchestrator_url}{path}"
+        response = self.session.post(
+            url,
+            json=payload,
+            headers=self.headers,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        if not response.content:
+            return {}
+        try:
+            return response.json()
+        except ValueError:
+            return {}
         
     def submit_task(self, query: str, metadata: Optional[Dict[str, Any]] = None) -> Task:
         """
@@ -145,7 +171,7 @@ class MultiAgentClient:
                 task_id=data.get('task_id', ''),
                 query=query,
                 status=TaskStatus(data.get('status', 'pending')),
-                metadata=metadata,
+                metadata=metadata or {},
                 created_at=datetime.now(),
                 errors=[]
             )
@@ -176,23 +202,86 @@ class MultiAgentClient:
             response.raise_for_status()
             
             data = response.json()
-            
-            task = Task(
-                task_id=task_id,
-                query=data.get('query', ''),
-                status=TaskStatus(data.get('status', 'pending')),
-                progress=data.get('progress', 0),
-                result=data.get('result'),
-                errors=data.get('errors', []),
-                subtasks=data.get('subtasks', [])
-            )
-            
+            data.setdefault('task_id', task_id)
+            data.setdefault('query', data.get('query', ''))
+            task = Task.from_dict(data)
             return task
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to get task status: {e}")
             raise
             
+    def retry_subtask(self, task_id: str, subtask_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
+        """Retry a specific subtask."""
+        payload = {'reason': reason} if reason else None
+        result = self._post(f"/tasks/{task_id}/subtasks/{subtask_id}/retry", payload)
+        logger.info("Manual retry requested for %s:%s -> %s", task_id, subtask_id, result.get('status'))
+        return result
+
+    def cancel_subtask(self, task_id: str, subtask_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
+        """Cancel an in-flight subtask."""
+        payload = {'reason': reason} if reason else None
+        result = self._post(f"/tasks/{task_id}/subtasks/{subtask_id}/cancel", payload)
+        logger.info("Manual cancel requested for %s:%s -> %s", task_id, subtask_id, result.get('status'))
+        return result
+
+    def prioritize_subtask(
+        self,
+        task_id: str,
+        subtask_id: str,
+        priority: int,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Adjust subtask priority (higher value = higher priority)."""
+        if priority < 0 or priority > 100:
+            raise ValueError("priority must be between 0 and 100")
+        payload: Dict[str, Any] = {'priority': priority}
+        if reason:
+            payload['reason'] = reason
+        result = self._post(f"/tasks/{task_id}/subtasks/{subtask_id}/prioritize", payload)
+        logger.info(
+            "Manual priority update for %s:%s -> %s",
+            task_id,
+            subtask_id,
+            result.get('new_priority'),
+        )
+        return result
+
+    def download_package(
+        self,
+        task_id: str,
+        package_index: int = 0,
+        destination: Optional[Union[str, Path]] = None,
+    ) -> bytes:
+        """Download a generated package archive."""
+        task = self.get_task_status(task_id)
+        packages = task.artifacts.get('packages', [])
+        if not packages:
+            raise ValueError("Task has no generated packages")
+        if package_index < 0 or package_index >= len(packages):
+            raise IndexError("Package index out of range")
+
+        package_entry = packages[package_index]
+        artifact = package_entry.get('artifact', {})
+        storage = artifact.get('storage')
+
+        if storage == 'inline_base64':
+            archive_b64 = artifact.get('archive_base64')
+            if not archive_b64:
+                raise ValueError("Inline artifact missing archive data")
+            archive_bytes = base64.b64decode(archive_b64)
+        elif storage == 'gcs':
+            raise NotImplementedError("Downloading from GCS storage is not yet supported in the SDK")
+        else:
+            raise ValueError(f"Unknown package storage type: {storage}")
+
+        if destination:
+            path = Path(destination)
+            path.write_bytes(archive_bytes)
+            logger.info("Saved package %s for task %s to %s", package_index, task_id, path)
+
+        return archive_bytes
+
     def wait_for_completion(self, task_id: str, 
                           poll_interval: int = 5,
                           max_wait_seconds: int = 300,

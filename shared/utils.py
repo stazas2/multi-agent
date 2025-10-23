@@ -5,10 +5,14 @@ import json
 import time
 import hashlib
 import random
+import base64
+import io
+import zipfile
+import uuid
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
-from shared.models import TaskContext, TaskStatus, SubTask, AgentType, AgentMessage
+from shared.models import TaskContext, TaskStatus, SubTask, AgentType, AgentMessage, GeneratedPackage
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -16,13 +20,105 @@ logger = logging.getLogger(__name__)
 
 LOCAL_MODE = str(os.environ.get("LOCAL_MODE", "0")).lower() in {"1", "true", "yes"}
 
+
+# === Model Routing ================================================================
+
+DEFAULT_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+
+
+def _load_agent_model_overrides() -> Dict[AgentType, str]:
+    overrides: Dict[AgentType, str] = {}
+    for agent_type in AgentType:
+        env_var = f"MODEL_{agent_type.name.upper()}"
+        value = os.environ.get(env_var)
+        if value:
+            overrides[agent_type] = value
+    return overrides
+
+
+AGENT_MODEL_OVERRIDES = _load_agent_model_overrides()
+
+
+def resolve_model_name(agent_type: Optional[AgentType] = None) -> str:
+    """Resolve the configured model name for a given agent type."""
+    if agent_type and agent_type in AGENT_MODEL_OVERRIDES:
+        return AGENT_MODEL_OVERRIDES[agent_type]
+    return DEFAULT_GEMINI_MODEL
+
+
+def package_to_zip_bytes(package: GeneratedPackage) -> bytes:
+    """Serialize a generated package into ZIP bytes."""
+    package.validate()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for asset in package.files:
+            zip_info = zipfile.ZipInfo(asset.path)
+            if asset.executable:
+                zip_info.external_attr = 0o755 << 16
+            zip_file.writestr(zip_info, asset.content)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def create_package_artifact(
+    package: GeneratedPackage,
+    project_id: str,
+    *,
+    prefix: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Persist a generated package and return artifact metadata."""
+    zip_bytes = package_to_zip_bytes(package)
+    created_at = datetime.utcnow().isoformat()
+
+    bucket_name = os.environ.get("PACKAGE_ARCHIVE_BUCKET")
+    if LOCAL_MODE or not bucket_name:
+        logger.info("Storing generated package inline (base64); bucket=%s", bucket_name)
+        encoded = base64.b64encode(zip_bytes).decode("ascii")
+        return {
+            "storage": "inline_base64",
+            "package": package.to_dict(),
+            "archive_base64": encoded,
+            "size_bytes": len(zip_bytes),
+            "created_at": created_at,
+        }
+
+    object_prefix = prefix or "packages"
+    object_name = f"{object_prefix.rstrip('/')}/{uuid.uuid4()}.zip"
+
+    if storage is None:
+        raise RuntimeError(
+            "google-cloud-storage is required to persist package artifacts. "
+            "Install google-cloud-storage or unset PACKAGE_ARCHIVE_BUCKET."
+        )
+
+    client = storage.Client(project=project_id)
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(object_name)
+    blob.upload_from_string(zip_bytes, content_type="application/zip")
+    blob.cache_control = "public, max-age=300"
+    blob.patch()
+
+    return {
+        "storage": "gcs",
+        "bucket": bucket_name,
+        "object": object_name,
+        "size_bytes": len(zip_bytes),
+        "created_at": created_at,
+        "package": package.to_dict(),
+    }
+
 if not LOCAL_MODE:
     from google.cloud import firestore, pubsub_v1, tasks_v2
+    try:
+        from google.cloud import storage  # type: ignore
+    except ImportError:
+        storage = None  # type: ignore
     import google.generativeai as genai
 else:
     firestore = None  # type: ignore
     pubsub_v1 = None  # type: ignore
     tasks_v2 = None  # type: ignore
+    storage = None  # type: ignore
     genai = None  # type: ignore
 
 
@@ -233,7 +329,11 @@ if not LOCAL_MODE:
                 "task_id": message.task_id,
                 "agent_type": message.agent_type.value,
                 "priority": str(message.priority),
+                "retry_count": str(message.retry_count),
             }
+            subtask_id = message.payload.get("subtask_id")
+            if subtask_id:
+                attributes["subtask_id"] = str(subtask_id)
 
             future = self.publisher.publish(
                 topic_path,
@@ -430,8 +530,21 @@ if not LOCAL_MODE:
                 raise ValueError("Gemini API key not provided")
 
             genai.configure(api_key=self.api_key)
-            model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
-            self.model = genai.GenerativeModel(model_name)
+            self._clients: Dict[str, Any] = {}
+
+        def get_client(self, agent_type: Optional[AgentType] = None):
+            """Return a cached generative model client for the agent."""
+            model_name = resolve_model_name(agent_type)
+            client = self._clients.get(model_name)
+            if client is None:
+                client = genai.GenerativeModel(model_name)
+                self._clients[model_name] = client
+                logger.info(
+                    "Initialised Gemini client for %s using model %s",
+                    agent_type.name if agent_type else "default",
+                    model_name,
+                )
+            return client
 
         def decompose_task(self, user_query: str) -> List[Dict[str, Any]]:
             prompt = f"""
@@ -449,7 +562,7 @@ if not LOCAL_MODE:
             """
 
             try:
-                response = self.model.generate_content(prompt)
+                response = self.get_client(AgentType.ORCHESTRATOR).generate_content(prompt)
                 subtasks_json = response.text.strip()
                 if subtasks_json.startswith("```json"):
                     subtasks_json = subtasks_json[7:]
@@ -469,7 +582,7 @@ if not LOCAL_MODE:
 
         def generate_response(self, prompt: str) -> str:
             try:
-                response = self.model.generate_content(prompt)
+                response = self.get_client(AgentType.ORCHESTRATOR).generate_content(prompt)
                 return response.text
             except Exception as exc:
                 logger.error("Gemini generation failed: %s", exc)
@@ -482,6 +595,10 @@ else:
 
         def __init__(self, api_key: Optional[str] = None):
             self.api_key = api_key
+
+        def get_client(self, agent_type: Optional[AgentType] = None):
+            """Return self for API compatibility."""
+            return self
 
         def decompose_task(self, user_query: str) -> List[Dict[str, Any]]:
             return [

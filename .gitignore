@@ -1,6 +1,6 @@
 .venv
 .env
-.env.*
+.env
 *.envrc
 
 # Agent build artefacts
