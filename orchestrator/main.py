@@ -326,17 +326,31 @@ class Orchestrator:
             
             # Create SubTask objects
             subtasks = []
+            pending_dependency_indices: Dict[str, List[int]] = {}
             for idx, subtask_data in enumerate(subtasks_data):
                 subtask = SubTask(
                     parent_task_id=context.task_id,
                     agent_type=resolve_agent_type(subtask_data['agent_type']),
                     description=subtask_data['description'],
                     parameters=subtask_data.get('parameters', {}),
-                    dependencies=[subtasks[i].subtask_id for i in subtask_data.get('dependencies', [])]
+                    dependencies=[],
                 )
                 subtasks.append(subtask)
-                
-                # Save subtask
+                pending_dependency_indices[subtask.subtask_id] = subtask_data.get('dependencies', [])
+
+            # Resolve dependency indices to subtask IDs safely
+            for subtask in subtasks:
+                resolved_deps: List[str] = []
+                for dep_idx in pending_dependency_indices.get(subtask.subtask_id, []):
+                    if 0 <= dep_idx < len(subtasks):
+                        resolved_deps.append(subtasks[dep_idx].subtask_id)
+                    else:
+                        logger.warning(
+                            "Ignoring invalid dependency index %s for subtask %s",
+                            dep_idx,
+                            subtask.subtask_id,
+                        )
+                subtask.dependencies = resolved_deps
                 self.firestore.save_subtask(subtask)
                 
             context.subtasks = [st.to_dict() for st in subtasks]

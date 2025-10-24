@@ -239,7 +239,8 @@ class CodeAgent:
         
         language = parameters.get('language', 'python')
         framework = parameters.get('framework', '')
-        package_requested = bool(parameters.get('package'))
+        package_flag = parameters.get('package')
+        package_requested = True if package_flag is None else bool(package_flag)
         
         # Build context from other agents
         agent_results = context.get('agent_results', {})
@@ -465,8 +466,18 @@ class CodeAgent:
         if text.startswith("```"):
             text = text.strip("`")
             if text.lower().startswith("json"):
-                text = text[4:]
-        payload = json.loads(text)
+                text = text[4:].lstrip()
+
+        # Extract JSON portion even if extra text surrounds it
+        start = text.find("{")
+        if start == -1:
+            raise ValueError("Package response missing JSON payload")
+        end = text.rfind("}")
+        if end == -1 or end < start:
+            raise ValueError("Package response contains malformed JSON")
+
+        json_fragment = text[start:end + 1]
+        payload = json.loads(json_fragment)
         package_payload = payload.get("package", payload)
         package = GeneratedPackage.from_dict(package_payload)
         package.metadata.setdefault("language", language)
